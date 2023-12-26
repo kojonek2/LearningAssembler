@@ -2,6 +2,7 @@ EXTERN ExitProcess : PROC
 EXTERN GetStdHandle : PROC
 EXTERN WriteConsoleA : PROC
 EXTERN ReadConsoleA : PROC
+EXTERN GetConsoleScreenBufferInfo : PROC
 
 .data
 STD_INPUT_HANDLE DWORD -10
@@ -11,7 +12,10 @@ stdOutput DWORD ?
 howTall BYTE "How tall christmass tree should be?:",0
 readToManyCharacters BYTE "Too many characters supplied!",0
 detectedNonDigit BYTE "Non digit character detected!",0
-printingTree BYTE "Printing tree with size: ",0
+zeroHeightText BYTE "Can't print tree with height 0",0
+heightTooBigText BYTE "Height of the tree is to big to print it in the current console!",0
+int64ExceededText BYTE "Number overflow!",0
+printingTree BYTE "Printing tree:",13,10,0
 
 .code
 
@@ -52,6 +56,10 @@ main PROC
 	MOV EDX, [RSP+34h]
 	CALL ParseNumber
 
+	; print tree
+	MOV RCX, RAX
+	CALL PrintTree
+
 	; set return code and exit
 	XOR RCX, RCX 
 	CALL ExitProcess
@@ -66,6 +74,124 @@ toManyCharsRead:
 	CALL ExitProcess
 
 main ENDP
+
+; CORD (4 bytes)
+; SHORT X +0 (2 bytes)
+; SHORT Y +2 (2 bytes)
+
+; SMALL_RECT (8 bytes)
+; SHORT Left +0 (2 bytes)
+; SHORT Top +2 (2 bytes)
+; SHORT Right +4 (2 bytes)
+; SHORT Bottom +6 (2 bytes)
+
+; _CONSOLE_SCREEN_BUFFER_INFO (22 bytes)
+; CORD dwSize +0 (4 bytes)
+; CORD dwCursorPosition +4 (4 bytes)
+; WORD wAttributes +8 (2 byte)
+; SMALL_RECT srWindow +10 (8 bytes)
+; CORD dwMaximumWindowSize +18 (4 bytes)
+
+;Prints christmass tree into console
+;First argument is the height
+PrintTree PROC
+	MOV [RSP+8h], R12 ; save R12 in homing
+	MOV [RSP+10h], R13 ; save R13 in homing
+	MOV [RSP+18h], R14 ; save R14 in homing
+	SUB RSP, 38h ; homing + 18h (24 bytes) for _CONSOLE_SCREEN_BUFFER_INFO and align
+
+	CMP RCX, 0
+	JE zeroHeight
+
+	; save print height in non volatile register
+	MOV R12, RCX
+
+	; get console info pointer
+	MOV ECX, stdOutput
+	LEA RDX, [RSP+20h] ; store it right after homing
+	CALL GetConsoleScreenBufferInfo
+
+	; calculate required width
+	MOV RAX, R12
+	MOV RCX, 2
+	MUL RCX
+	JC heightTooBig
+	SUB RAX, 1
+
+	;check if width is enough
+	XOR RCX, RCX 
+	MOV CX, [RSP+20h] ; load width of console to CX
+	CMP RCX, RAX
+	JL heightTooBig
+	
+	;save length of buffer to R13
+	ADD RAX, 3 ; CL RF \0
+	MOV R13, RAX
+
+	LEA RCX, printingTree
+	CALL WriteConsoleNullTerminated
+
+	;crete space for buffer on stack
+	SUB RSP, R13
+
+	; RAX current addres, RCX target address
+	LEA RAX, [RSP + 20h]
+	LEA RCX, [RSP + R13 + 20h]
+
+	;set all buffer to zero
+zeroOut:
+	MOV BYTE PTR [RAX], 20h ; space
+	INC RAX
+	CMP RAX, RCX
+	JL zeroOut
+
+	;set CR LR \0
+	MOV BYTE PTR [RCX - 1h], 0 ; \0
+	MOV BYTE PTR [RCX - 2h], 13 ; CR
+	MOV BYTE PTR [RCX - 3h], 10 ; LR
+
+	; R14 iteration
+	MOV R14, 0
+printLoop:
+	LEA RAX, [RSP + 20h + R12 - 1] ; calculate center
+	MOV BYTE PTR [RAX + R14], 2Ah ; *
+	SUB RAX, R14
+	MOV BYTE PTR [RAX], 2Ah ; *
+
+	LEA RCX, [RSP + 20h]
+	CALL WriteConsoleNullTerminated
+
+	INC R14
+	CMP R14, R12
+	JL printLoop
+
+	ADD RSP, R13
+
+	;epilog
+	ADD RSP, 38h
+	MOV R12, [RSP+8h] ; restore R12 in homing
+	MOV R13, [RSP+10h] ; restore R13 in homing
+	MOV R14, [RSP+18h] ; restore R14 in homing
+	RET
+
+heightTooBig:
+	; print error
+	LEA RCX, heightTooBigText
+	CALL WriteConsoleNullTerminated
+
+	; set return code and exit
+	MOV RCX, 1 
+	CALL ExitProcess
+
+zeroHeight:
+	; print error
+	LEA RCX, zeroHeightText
+	CALL WriteConsoleNullTerminated
+
+	; set return code and exit
+	MOV RCX, 1 
+	CALL ExitProcess
+PrintTree ENDP
 
 ; Parses number from the string
 ; First argument is pointer to the data buffer
@@ -97,6 +223,7 @@ parseLoop:
 
 	; add digit to number
 	MUL R10
+	JC int64Exceeded
 	ADD RAX, R8
 
 	; increase address of the letter
@@ -109,6 +236,15 @@ parseLoop:
 epilog:
 	ADD RSP, 28h
 	RET
+
+int64Exceeded:
+	; print error
+	LEA RCX, int64ExceededText
+	CALL WriteConsoleNullTerminated
+
+	; set return code and exit
+	MOV RCX, 1 
+	CALL ExitProcess
 
 nonLiteral:
 	CMP R8, -35 ; 13 (CR) - 48
@@ -128,6 +264,8 @@ ParseNumber ENDP
 ; first argument is pointer to the text
 WriteConsoleNullTerminated PROC
 	MOV [RSP+8h], RCX ; home RCX
+	MOV [RSP+10h], R12 ; save R12
+	MOV [RSP+18h], R13 ; save R13
 	SUB RSP, 28h ; 4 bytes homing + align
 
 	MOV R12, RCX ; move text pointer to non volatile register
@@ -153,6 +291,8 @@ nullTerminationFound:
 	CALL WriteConsoleA
 
 	ADD RSP, 28h
+	MOV R12, [RSP+10h] ; restore R12
+	MOV R13, [RSP+18h] ; restore R13
 	RET
 WriteConsoleNullTerminated ENDP
 END
